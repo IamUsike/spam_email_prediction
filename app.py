@@ -1,157 +1,170 @@
-import os
 import streamlit as st
 import pandas as pd
-import nltk
-from nltk.corpus import stopwords
-from nltk.stem import PorterStemmer
-from nltk.tokenize import sent_tokenize, word_tokenize  # Added sent_tokenize
-import string
-import re
+import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.svm import SVC
-import pickle
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_score
+import joblib
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import PorterStemmer
+import re
+import string
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Download NLTK data
+nltk.download("punkt")
+nltk.download("stopwords")
+nltk.download("punkt_tab")
 
 
-# Set up NLTK data path and downloads
-@st.cache_resource
-def setup_nltk():
-    try:
-        # Create and set nltk data directory
-        nltk_data_dir = os.path.expanduser("~/nltk_data")
-        if not os.path.exists(nltk_data_dir):
-            os.makedirs(nltk_data_dir)
-
-        # Add the directory to NLTK's data path
-        nltk.data.path.append(nltk_data_dir)
-
-        # Download required NLTK data
-        for package in ["punkt", "stopwords"]:
-            try:
-                nltk.data.find(f"tokenizers/{package}")
-            except LookupError:
-                nltk.download(package, download_dir=nltk_data_dir, quiet=True)
-
-        return True
-    except Exception as e:
-        st.error(f"Error setting up NLTK: {str(e)}")
-        return False
-
-
+# Function to preprocess text
 def preprocess_text(text):
+    """Preprocess the input text: lowercase, tokenize, remove special chars, stopwords, and stem."""
+    text = text.lower()
+    tokens = word_tokenize(text)
+    tokens = [re.sub(r"[^a-zA-Z0-9\s]", "", word) for word in tokens]
+    stop_words = set(stopwords.words("english"))
+    tokens = [
+        word
+        for word in tokens
+        if word not in stop_words and word not in string.punctuation
+    ]
+    ps = PorterStemmer()
+    tokens = [ps.stem(word) for word in tokens]
+    return " ".join(tokens)
+
+
+# Function to train and save model or load existing model
+@st.cache_resource
+def load_or_train_model():
     try:
-        # Convert to lowercase
-        text = text.lower()
+        # Attempt to load pre-trained model and vectorizer
+        svc_classifier = joblib.load("svc_model.pkl")
+        tfidf = joblib.load("tfidf_vectorizer.pkl")
+        st.info("Loaded pre-trained model and vectorizer.")
+    except FileNotFoundError:
+        # If files don't exist, train the model
+        st.info("Training model from scratch...")
 
-        # First split into sentences, then words
-        sentences = sent_tokenize(text)
-        tokens = []
-        for sentence in sentences:
-            tokens.extend(word_tokenize(sentence))
+        # Load and preprocess data
+        data = pd.read_csv("spam.csv", encoding="latin1")
+        data = data.drop(columns=["Unnamed: 2", "Unnamed: 3", "Unnamed: 4"])
+        data.rename(columns={"v1": "result", "v2": "emails"}, inplace=True)
+        data = data.drop_duplicates(keep="first")
 
-        # Rest of preprocessing...
-        tokens = [re.sub(r"[^a-zA-Z0-9\s]", "", word) for word in tokens]
-        stop_words = set(stopwords.words("english"))
-        tokens = [
-            word
-            for word in tokens
-            if word not in stop_words
-            and word not in string.punctuation
-            and word.strip()
-        ]
+        # Preprocess emails
+        data["transform_text"] = data["emails"].apply(preprocess_text)
 
-        ps = PorterStemmer()
-        tokens = [ps.stem(word) for word in tokens]
+        # Vectorize and encode labels
+        tfidf = TfidfVectorizer(max_features=3000)
+        X = tfidf.fit_transform(data["transform_text"]).toarray()
+        y = data["result"].map({"ham": 0, "spam": 1})  # 0 for ham, 1 for spam
 
-        return " ".join(tokens)
-    except Exception as e:
-        st.error(f"Error in preprocessing: {str(e)}")
-        return ""
+        # Train SVC model
+        svc_classifier = SVC()
+        svc_classifier.fit(X, y)
 
+        # Save the model and vectorizer
+        joblib.dump(svc_classifier, "svc_model.pkl")
+        joblib.dump(tfidf, "tfidf_vectorizer.pkl")
+        st.success("Model trained and saved successfully!")
 
-# Initialize NLTK at startup
-if not setup_nltk():
-    st.error("Failed to initialize NLTK. Please check your installation.")
+    return svc_classifier, tfidf
 
 
+# Main Streamlit app
 def main():
-    st.title("Email Spam Detector")
-    st.write("Enter an email message to check if it's spam or not!")
+    st.title("Spam Email Classifier")
+    st.markdown(
+        """
+    This app classifies emails as **Spam** or **Ham** using a Support Vector Classifier (SVC).
+    Enter an email text below to see the prediction!
+    """
+    )
 
-    # Create a text area for email input
-    email_text = st.text_area("Email Content", height=200)
+    # Load or train model and vectorizer
+    svc_classifier, tfidf = load_or_train_model()
 
-    if st.button("Check Spam"):
-        if email_text:
-            try:
-                # Load models
-                tfidf, model = load_models()
-                if tfidf is None or model is None:
-                    return
+    # Sidebar for additional info
+    st.sidebar.header("About")
+    st.sidebar.write(
+        """
+    - Built with Streamlit and Scikit-learn.
+    - Uses a pre-trained SVC model trained on the `spam.csv` dataset.
+    - Features: TF-IDF vectorization, text preprocessing (stemming, stopword removal).
+    """
+    )
 
-                # Preprocess the input text
-                processed_text = preprocess_text(email_text)
-                if not processed_text:
-                    st.error("Error processing text. Please try again.")
-                    return
+    # User input section
+    st.subheader("Classify Your Email")
+    email_input = st.text_area(
+        "Enter your email text here:",
+        height=150,
+        placeholder="e.g., 'Get a free iPhone now!'",
+    )
 
-                # Transform the text using loaded vectorizer
-                text_vector = tfidf.transform([processed_text]).toarray()
+    if st.button("Classify"):
+        if email_input:
+            # Preprocess and predict
+            processed_text = preprocess_text(email_input)
+            X_new = tfidf.transform([processed_text]).toarray()
+            prediction = svc_classifier.predict(X_new)[0]
 
-                # Make prediction
-                prediction = model.predict(text_vector)[0]
-
-                # Display result with custom styling
-                if prediction == 1:
-                    st.error("🚨 This email is likely SPAM!")
-                    st.write(
-                        "This message contains characteristics commonly found in spam emails."
-                    )
-                else:
-                    st.success("✅ This email appears to be legitimate (HAM)!")
-                    st.write("This message appears to be a normal, non-spam email.")
-
-                # Display email statistics
-                st.write("---")
-                st.write("Email Statistics:")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write(f"Word Count: {len(email_text.split())}")
-                with col2:
-                    st.write(f"Character Count: {len(email_text)}")
-
-            except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
-                st.write(
-                    "Please make sure all required files and dependencies are properly loaded."
-                )
+            # Display result
+            if prediction == 1:
+                st.error(f"'{email_input}' is predicted as **Spam**.")
+            else:
+                st.success(f"'{email_input}' is predicted as **Ham**.")
         else:
-            st.warning("Please enter some email text to analyze.")
+            st.warning("Please enter some text to classify.")
 
-    # Add information about the model
-    with st.expander("About the Spam Detection Model"):
-        st.write(
-            """
-        This spam detection model uses:
-        - Support Vector Machine (SVM) classifier
-        - TF-IDF vectorization for text processing
-        - NLTK for text preprocessing
-        - Trained on a dataset of labeled spam and ham emails
-        """
-        )
+    # Example predictions section
+    st.subheader("Example Predictions")
+    examples = [
+        "Get a free iPhone now!",
+        "Hey, how's it going?",
+        "Congratulations! You've won a prize!",
+        "Reminder: Meeting at 2 PM tomorrow.",
+    ]
+    for example in examples:
+        processed_example = preprocess_text(example)
+        X_example = tfidf.transform([processed_example]).toarray()
+        pred = svc_classifier.predict(X_example)[0]
+        label = "Spam" if pred == 1 else "Ham"
+        st.write(f"'{example}' → **{label}**")
 
-    # Add tips for users
-    with st.expander("Tips for Identifying Spam"):
-        st.write(
-            """
-        Common characteristics of spam emails:
-        - Promises of free products or money
-        - Urgency or pressure to act quickly
-        - Requests for personal information
-        - Poor grammar or spelling
-        - Unexpected attachments
-        - Suspicious sender addresses
-        """
-        )
+    # Optional: Display model performance (if trained)
+    st.subheader("Model Performance")
+    if st.checkbox("Show Model Metrics"):
+        data = pd.read_csv("spam.csv", encoding="latin1")
+        data = data.drop(columns=["Unnamed: 2", "Unnamed: 3", "Unnamed: 4"])
+        data.rename(columns={"v1": "result", "v2": "emails"}, inplace=True)
+        data = data.drop_duplicates(keep="first")
+        data["transform_text"] = data["emails"].apply(preprocess_text)
+
+        X = tfidf.transform(data["transform_text"]).toarray()
+        y = data["result"].map({"ham": 0, "spam": 1})
+
+        y_pred = svc_classifier.predict(X)
+        accuracy = accuracy_score(y, y_pred)
+        precision = precision_score(y, y_pred)
+        conf_matrix = confusion_matrix(y, y_pred)
+
+        st.write(f"**Accuracy:** {accuracy:.2f}")
+        st.write(f"**Precision:** {precision:.2f}")
+        st.write("**Confusion Matrix:**")
+        st.write(conf_matrix)
+
+        # Plot confusion matrix
+        fig, ax = plt.subplots()
+        sns.heatmap(conf_matrix, annot=True, fmt="d", cmap="Blues", ax=ax)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
+        ax.set_title("Confusion Matrix")
+        st.pyplot(fig)
 
 
 if __name__ == "__main__":
